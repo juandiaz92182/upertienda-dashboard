@@ -1,0 +1,131 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import numpy as np
+import io
+
+# Configuración de la página
+st.set_page_config(page_title="Dashboard Supertienda", layout="wide")
+st.title("📊 Dashboard de Actividades - Supertienda")
+
+# --- CARGA DE DATOS ---
+uploaded_file = st.file_uploader("📁 Carga el archivo `BD_Supertienda.xlsx`", type=["xlsx"])
+
+if uploaded_file is not None:
+    @st.cache_data
+    def load_data(file):
+        return pd.read_excel(file, sheet_name="Compras")
+    
+    df = load_data(uploaded_file)
+
+    # ========================================================================
+    # 1. ACTIVIDADES PREVIAS (Preprocesamiento)
+    # ========================================================================
+    st.header("1️⃣ Actividades Previas & Preprocesamiento")
+    
+    # Cambiar formatos de fecha a YYYY-MM-DD
+    df['Fecha del pedido'] = pd.to_datetime(df['Fecha del pedido'], errors='coerce')
+    df['Fecha de envío'] = pd.to_datetime(df['Fecha de envío'], errors='coerce')
+    
+    # Calcular tiempo transcurrido entre envío y pedido en días
+    df['Tiempo Entrega (días)'] = (df['Fecha de envío'] - df['Fecha del pedido']).dt.days
+    
+    # Crear columna para calcular el valor unitario
+    df['Valor Unitario Calc'] = np.where(df['Cantidad'] > 0, df['Ventas'] / df['Cantidad'], 0.0)
+    
+    # Mostrar vista previa de las columnas calculadas
+    st.success("✅ Preprocesamiento completado. Revisa las nuevas columnas a continuación:")
+    cols_calc = ['Fecha del pedido', 'Fecha de envío', 'Tiempo Entrega (días)', 'Ventas', 'Cantidad', 'Valor Unitario Calc']
+    st.dataframe(df[cols_calc].head(5), use_container_width=True)
+
+    # Preparar datos para análisis
+    df['Devuelto Si/NO'] = df['Devuelto Si/NO'].astype(str).str.strip().str.lower()
+    returns_df = df[df['Devuelto Si/NO'].isin(['sí', 'si', 's'])]
+
+    # Diccionario de dimensiones solicitadas
+    dimensions = {
+        'Método de envío': 'Método de Envío',
+        'Segmento': 'Segmento',
+        'Ciudad': 'Ciudad',
+        'Provincia/Estado/Departamento': 'Provincia/Estado',
+        'País/Región': 'País/Región',
+        'Región': 'Región'
+    }
+
+    # Botón para descargar la "Hoja de Actividades" procesada
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name="Hoja Actividades")
+    st.download_button(
+        label="📥 Descargar Excel con Hoja de Actividades",
+        data=buffer.getvalue(),
+        file_name="BD_Supertienda_Actividades.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    # ========================================================================
+    # 2. DASHBOARD DE GRÁFICOS
+    # ========================================================================
+    tab_ventas, tab_devoluciones, tab_categorias, tab_productos = st.tabs([
+        "📦 Ventas", "🔄 Devoluciones", "🏷️ Categorías", "📦 Productos"
+    ])
+
+    # Función auxiliar: Gráfico de barras para conteos simples (ventas/devoluciones)
+    def plot_count(df_data, group_col, metric_type, label):
+        grouped = df_data.groupby(group_col).size().reset_index(name='Cantidad')
+        grouped = grouped.sort_values('Cantidad', ascending=False).head(20) # Top 20 para legibilidad
+        fig = px.bar(grouped, x=group_col, y='Cantidad', 
+                     title=f"{metric_type} por {label}",
+                     labels={group_col: label, 'Cantidad': 'Total'},
+                     color='Cantidad', color_continuous_scale='Viridis')
+        fig.update_layout(xaxis_tickangle=-45, margin=dict(t=40, b=20))
+        return fig
+
+    # Función auxiliar: Gráfico de barras para valores únicos (categorías/productos)
+    def plot_unique(df_data, group_col, count_col, metric_type, label):
+        grouped = df_data.groupby(group_col)[count_col].nunique().reset_index(name='Cantidad Única')
+        grouped = grouped.sort_values('Cantidad Única', ascending=False).head(20)
+        fig = px.bar(grouped, x=group_col, y='Cantidad Única', 
+                     title=f"{metric_type} por {label}",
+                     labels={group_col: label, 'Cantidad Única': 'Total Único'},
+                     color='Cantidad Única', color_continuous_scale='Blues')
+        fig.update_layout(xaxis_tickangle=-45, margin=dict(t=40, b=20))
+        return fig
+
+    # --- Pestaña 1: Ventas ---
+    with tab_ventas:
+        st.header("📈 Indicador: Cuántas ventas se crearon por dimensión")
+        cols = st.columns(2)
+        for i, (col_key, col_label) in enumerate(dimensions.items()):
+            with cols[i % 2]:
+                st.plotly_chart(plot_count(df, col_key, "Ventas", col_label), use_container_width=True)
+
+    # --- Pestaña 2: Devoluciones ---
+    with tab_devoluciones:
+        st.header("🔄 Indicador: Cuántas devoluciones se crearon por dimensión")
+        if len(returns_df) == 0:
+            st.warning("⚠️ No se encontraron registros marcados como devueltos ('Sí') en los datos.")
+        else:
+            cols = st.columns(2)
+            for i, (col_key, col_label) in enumerate(dimensions.items()):
+                with cols[i % 2]:
+                    st.plotly_chart(plot_count(returns_df, col_key, "Devoluciones", col_label), use_container_width=True)
+
+    # --- Pestaña 3: Categorías ---
+    with tab_categorias:
+        st.header("🏷️ Indicador: Cuántas categorías distintas hay por dimensión")
+        cols = st.columns(2)
+        for i, (col_key, col_label) in enumerate(dimensions.items()):
+            with cols[i % 2]:
+                st.plotly_chart(plot_unique(df, col_key, 'Categoría', "Categorías", col_label), use_container_width=True)
+
+    # --- Pestaña 4: Productos ---
+    with tab_productos:
+        st.header("📦 Indicador: Cuántos productos distintos hay por dimensión")
+        cols = st.columns(2)
+        for i, (col_key, col_label) in enumerate(dimensions.items()):
+            with cols[i % 2]:
+                st.plotly_chart(plot_unique(df, col_key, 'Nombre del producto', "Productos", col_label), use_container_width=True)
+
+else:
+    st.info("⬆️ Por favor, sube el archivo `BD_Supertienda.xlsx` para generar el dashboard y la hoja de actividades.")
